@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Sphere Interface</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<style>
+
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
+}
+
+body{
+    overflow:hidden;
+    background:#020408;
+    font-family:Arial, sans-serif;
+    cursor:none;
+}
+
+canvas{
+    display:block;
+}
+
+#video{
+    position:fixed;
+    top:18px;
+    right:18px;
+    width:230px;
+    border:1px solid rgba(0,255,255,0.5);
+    border-radius:14px;
+    z-index:20;
+    transform:scaleX(-1);
+    opacity:0.85;
+    box-shadow:0 0 25px rgba(0,255,255,0.25);
+}
+
+#hud{
+    position:fixed;
+    top:20px;
+    left:20px;
+    color:#00ffff;
+    z-index:20;
+    font-size:18px;
+    letter-spacing:3px;
+    padding:14px 20px;
+    border-radius:12px;
+    border:1px solid rgba(0,255,255,0.3);
+    background:rgba(0,0,0,0.3);
+    backdrop-filter:blur(10px);
+    box-shadow:0 0 30px rgba(0,255,255,0.15);
+}
+
+#info{
+    position:fixed;
+    bottom:20px;
+    left:20px;
+    color:white;
+    z-index:20;
+    padding:16px;
+    border-radius:12px;
+    border:1px solid rgba(255,255,255,0.15);
+    background:rgba(0,0,0,0.28);
+    line-height:1.8;
+    backdrop-filter:blur(12px);
+}
+
+#scanlines{
+    position:fixed;
+    inset:0;
+    pointer-events:none;
+    z-index:15;
+    background:repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0,255,255,0.02) 4px
+    );
+}
+
+#cursor{
+    position:fixed;
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    background:#00ffff;
+    pointer-events:none;
+    z-index:999;
+    box-shadow:
+        0 0 10px #00ffff,
+        0 0 25px #00ffff,
+        0 0 50px #00ffff;
+}
+
+</style>
+</head>
+<body>
+
+<div id="scanlines"></div>
+<div id="cursor"></div>
+
+<div id="hud">
+NEURAL SPHERE ACTIVE
+</div>
+
+<div id="info">
+🤏 PINCH → ZOOM<br>
+✋ OPEN PALM → REPEL FIELD<br>
+👉 ONE FINGER → ROTATE<br>
+✊ FIST → ENERGY PULSE
+</div>
+
+<video id="video" autoplay playsinline muted></video>
+
+<script>
+
+// =====================================
+// SCENE
+// =====================================
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x020408,0.03);
+
+const camera = new THREE.PerspectiveCamera(
+    65,
+    window.innerWidth/window.innerHeight,
+    0.1,
+    1000
+);
+
+camera.position.z = 22;
+
+const renderer = new THREE.WebGLRenderer({
+    antialias:true,
+    powerPreference:'high-performance'
+});
+
+renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+);
+
+renderer.setPixelRatio(
+    Math.min(window.devicePixelRatio,2)
+);
+
+renderer.setClearColor(0x020408);
+
+document.body.appendChild(renderer.domElement);
+
+
+// =====================================
+// PARTICLES
+// =====================================
+
+const particleCount = 12000;
+
+const geometry = new THREE.BufferGeometry();
+
+const positions = new Float32Array(
+    particleCount*3
+);
+
+const targets = new Float32Array(
+    particleCount*3
+);
+
+const velocities = new Float32Array(
+    particleCount*3
+);
+
+const colors = new Float32Array(
+    particleCount*3
+);
+
+
+for(let i=0;i<particleCount;i++){
+
+    const ix = i*3;
+
+    const radius = 7;
+
+    const theta = Math.random()*Math.PI*2;
+    const phi = Math.acos((Math.random()*2)-1);
+
+    const x = radius*Math.sin(phi)*Math.cos(theta);
+    const y = radius*Math.sin(phi)*Math.sin(theta);
+    const z = radius*Math.cos(phi);
+
+    positions[ix] = x;
+    positions[ix+1] = y;
+    positions[ix+2] = z;
+
+    targets[ix] = x;
+    targets[ix+1] = y;
+    targets[ix+2] = z;
+
+    velocities[ix] = 0;
+    velocities[ix+1] = 0;
+    velocities[ix+2] = 0;
+
+    colors[ix] = 0;
+    colors[ix+1] = 1;
+    colors[ix+2] = 1;
+}
+
+geometry.setAttribute(
+    'position',
+    new THREE.BufferAttribute(positions,3)
+);
+
+geometry.setAttribute(
+    'color',
+    new THREE.BufferAttribute(colors,3)
+);
+
+
+const material = new THREE.PointsMaterial({
+
+    size:0.055,
+    vertexColors:true,
+    transparent:true,
+    opacity:0.95,
+    blending:THREE.AdditiveBlending,
+    depthWrite:false
+});
+
+const particles = new THREE.Points(
+    geometry,
+    material
+);
+
+scene.add(particles);
+
+
+// =====================================
+// HAND STATE
+// =====================================
+
+const hand = {
+    detected:false,
+    x:0,
+    y:0,
+    pinch:false,
+    open:false,
+    fist:false,
+    oneFinger:false
+};
+
+let targetZoom = 22;
+let energyPulse = false;
+
+const hud = document.getElementById('hud');
+const video = document.getElementById('video');
+
+
+// =====================================
+// UTILITIES
+// =====================================
+
+function distance(a,b){
+
+    const dx = a.x-b.x;
+    const dy = a.y-b.y;
+
+    return Math.sqrt(dx*dx+dy*dy);
+}
+
+
+// =====================================
+// MEDIAPIPE
+// =====================================
+
+const hands = new Hands({
+
+    locateFile:(file)=>{
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }
+});
+
+hands.setOptions({
+
+    maxNumHands:1,
+    modelComplexity:1,
+    minDetectionConfidence:0.75,
+    minTrackingConfidence:0.75
+});
+
+hands.onResults(results=>{
+
+    if(results.multiHandLandmarks && results.multiHandLandmarks.length>0){
+
+        const lm = results.multiHandLandmarks[0];
+
+        hand.detected = true;
+
+        const palm = lm[9];
+
+        hand.x = (0.5-palm.x)*18;
+        hand.y = (0.5-palm.y)*12;
+
+        const pinchDistance = distance(
+            lm[4],
+            lm[8]
+        );
+
+        hand.pinch = pinchDistance < 0.13;
+
+
+        let curled = 0;
+
+        const tips = [8,12,16,20];
+        const bases = [5,9,13,17];
+
+        for(let i=0;i<4;i++){
+
+            if(lm[tips[i]].y > lm[bases[i]].y){
+                curled++;
+            }
+        }
+
+        hand.fist = curled >= 3;
+        hand.open = curled <= 1;
+
+
+        hand.oneFinger =
+            lm[8].y < lm[6].y &&
+            lm[12].y > lm[10].y;
+
+
+        // =========================
+        // PINCH ZOOM
+        // =========================
+
+        if(hand.pinch){
+
+            hud.innerText = 'PINCH ZOOM ACTIVE';
+
+            const zoomStrength = pinchDistance*100;
+
+            targetZoom = THREE.MathUtils.clamp(
+                34 - zoomStrength,
+                5,
+                34
+            );
+        }
+
+
+        // =========================
+        // OPEN PALM
+        // =========================
+
+        else if(hand.open){
+
+            hud.innerText = 'REPEL FIELD ACTIVE';
+        }
+
+
+        // =========================
+        // ONE FINGER
+        // =========================
+
+        else if(hand.oneFinger){
+
+            hud.innerText = 'SPHERE ROTATION MODE';
+
+            particles.rotation.y += 0.03;
+        }
+
+
+        // =========================
+        // FIST ENERGY PULSE
+        // =========================
+
+        else if(hand.fist){
+
+            hud.innerText = 'ENERGY PULSE';
+
+            energyPulse = true;
+        }
+
+
+        else{
+            hud.innerText = 'HAND DETECTED';
+        }
+    }
+
+    else{
+
+        hand.detected = false;
+        hud.innerText = 'NO HAND DETECTED';
+    }
+});
+
+
+const cam = new Camera(video,{
+
+    onFrame:async()=>{
+        await hands.send({image:video});
+    },
+
+    width:640,
+    height:480
+});
+
+cam.start();
+
+
+// =====================================
+// CURSOR
+// =====================================
+
+const cursor = document.getElementById('cursor');
+
+window.addEventListener('mousemove',e=>{
+
+    cursor.style.left = e.clientX+'px';
+    cursor.style.top = e.clientY+'px';
+});
+
+
+// =====================================
+// ANIMATION
+// =====================================
+
+const clock = new THREE.Clock();
+
+function animate(){
+
+    requestAnimationFrame(animate);
+
+    const time = clock.getElapsedTime();
+
+
+    // =========================
+    // SMOOTH CAMERA
+    // =========================
+
+    camera.position.z +=
+        (
+            targetZoom -
+            camera.position.z
+        )*0.05;
+
+    camera.position.x =
+        Math.sin(time*0.2)*0.8;
+
+    camera.position.y =
+        Math.cos(time*0.18)*0.5;
+
+
+    const pos = geometry.attributes.position.array;
+
+
+    for(let i=0;i<particleCount;i++){
+
+        const ix = i*3;
+
+        let x = pos[ix];
+        let y = pos[ix+1];
+        let z = pos[ix+2];
+
+
+        // =========================
+        // RETURN FORCE
+        // =========================
+
+        velocities[ix] +=
+            (targets[ix]-x)*0.012;
+
+        velocities[ix+1] +=
+            (targets[ix+1]-y)*0.012;
+
+        velocities[ix+2] +=
+            (targets[ix+2]-z)*0.012;
+
+
+        // =========================
+        // SPHERE BREATHING
+        // =========================
+
+        velocities[ix] +=
+            Math.sin(time+x)*0.0004;
+
+        velocities[ix+1] +=
+            Math.cos(time+y)*0.0004;
+
+
+        // =========================
+        // OPEN HAND REPEL
+        // =========================
+
+        if(hand.detected && hand.open){
+
+            const dx = x-hand.x;
+            const dy = y-hand.y;
+
+            const dist = Math.sqrt(dx*dx+dy*dy);
+
+            if(dist < 5){
+
+                const force =
+                    (5-dist)*0.03;
+
+                velocities[ix] += dx*force;
+                velocities[ix+1] += dy*force;
+            }
+        }
+
+
+        // =========================
+        // ENERGY PULSE
+        // =========================
+
+        if(energyPulse){
+
+            velocities[ix] += x*0.015;
+            velocities[ix+1] += y*0.015;
+            velocities[ix+2] += z*0.015;
+        }
+
+
+        velocities[ix] *= 0.92;
+        velocities[ix+1] *= 0.92;
+        velocities[ix+2] *= 0.92;
+
+
+        pos[ix] += velocities[ix];
+        pos[ix+1] += velocities[ix+1];
+        pos[ix+2] += velocities[ix+2];
+    }
+
+
+    energyPulse = false;
+
+
+    geometry.attributes.position.needsUpdate = true;
+
+
+    particles.rotation.y += 0.0015;
+    particles.rotation.x =
+        Math.sin(time*0.3)*0.08;
+
+
+    renderer.render(scene,camera);
+}
+
+animate();
+
+
+// =====================================
+// RESIZE
+// =====================================
+
+window.addEventListener('resize',()=>{
+
+    camera.aspect =
+        window.innerWidth/window.innerHeight;
+
+    camera.updateProjectionMatrix();
+
+    renderer.setSize(
+        window.innerWidth,
+        window.innerHeight
+    );
+});
+
+</script>
+</body>
+</html>
